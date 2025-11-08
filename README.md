@@ -2,6 +2,41 @@
 
 This project is the backend for your personal AI Agent system using FastAPI.
 
+## Architecture
+                    ┌────────────────────────────────────┐
+                    │            Frontend (later)        │
+                    │  React/Next.js chat UI             │
+                    │  - sends /chat, /ask requests      │
+                    └───────────────▲────────────────────┘
+                                    │ HTTP (JSON)
+                                    │
+                        ┌───────────┴───────────┐
+                        │  FastAPI Backend      │
+                        │  (ai-agent-lab)       │
+                        │                       │
+             ┌──────────┴──────────┐     ┌─────┴────────────────┐
+             │  Chat Router        │     │  Retrieval Router     │
+             │  /chat              │     │  /ingest, /ask        │
+             └──────────▲──────────┘     └───────────▲──────────┘
+                        │                            │
+                        │ calls                      │ calls
+                        │                            │
+               ┌────────┴───────────┐        ┌───────┴─────────────────────┐
+               │  LLM Service       │        │  RAG Service                 │
+               │  (OpenAI client)   │        │  - chunk & embed documents   │
+               │                    │        │  - upsert to Vector DB       │
+               │  - handles models  │        │  - semantic search (top-k)   │
+               │  - API errors      │        │  - build augmented prompt     │
+               └────────▲───────────┘        └─────────▲────────────────────┘
+                        │                               │
+                        │ OpenAI API                    │ Qdrant (Vector DB)
+                        │                               
+              ┌─────────┴──────────┐          ┌─────────┴──────────┐
+              │ Provider (LLM)     │          │ Qdrant (Docker)    │
+              │ gpt-4o-mini, etc.  │          │ embeddings index    │
+              └────────────────────┘          └─────────────────────┘
+
+
 ## ✅ Features
 - FastAPI backend
 - `/health` endpoint

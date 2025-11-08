@@ -6,12 +6,15 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post("", response_model=ChatResponse)
 def chat_api(request: ChatRequest):
+    # Convert pydantic models to dicts for service
+    msgs = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
         output = generate_chat_response(
-            request.messages,
+            msgs,
             model=request.model,
             temperature=request.temperature
         )
         return ChatResponse(reply=output)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except RuntimeError as e:
+        # Examples: missing key, insufficient_quota, etc.
+        raise HTTPException(status_code=503, detail=str(e))

@@ -12,4 +12,9 @@ class Settings(BaseModel):
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     openai_temperature: float = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
 
+    # Qdrant / RAG settings
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "ai_agent_docs"
+    openai_embedding_model: str = "text-embedding-3-small"
+
 settings = Settings()

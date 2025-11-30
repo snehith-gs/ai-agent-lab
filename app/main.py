@@ -6,8 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.logging import configure_logging
 from app.core.settings import settings
-from app.routers import health, chat
-from app.routers import tools  # add this
+from app.routers import health, chat, tools, docs
 
 configure_logging()
 app = FastAPI(title=settings.app_name, version=settings.version)
@@ -24,3 +23,4 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(tools.router)
+app.include_router(docs.router) 

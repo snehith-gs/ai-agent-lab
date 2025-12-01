@@ -1,8 +1,9 @@
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Tuple, Optional
 
 from openai import OpenAI, OpenAIError
 
+from app.models.schemas import ChatMessage, RetrievedSource
 from app.core.settings import settings
 from app.services import memory, rag_service
 
@@ -30,27 +31,6 @@ def get_client() -> OpenAI:
         _client = OpenAI(api_key=settings.openai_api_key)
     return _client
 
-def _build_rag_context(user_message: str, top_k: int = 4) -> str:
-    """
-    Ask Qdrant for relevant chunks and turn them into a text block
-    that we can feed as context to the LLM.
-    """
-    chunks = rag.retrieve_relevant_chunks(user_message, limit=top_k)
-    if not chunks:
-        return ""
-
-    lines: List[str] = []
-    for idx, c in enumerate(chunks, start=1):
-        source = c.get("source", "unknown")
-        content = c.get("content", "")
-        lines.append(f"[{idx}] (source: {source})\n{content}")
-
-    context = (
-        "Use the following reference passages to answer the user. "
-        "If they are not relevant, you can ignore them.\n\n"
-        + "\n\n".join(lines)
-    )
-    return context
 
 def generate_chat_response(
     session_id: Optional[str],
@@ -58,62 +38,75 @@ def generate_chat_response(
     model: Optional[str],
     temperature: Optional[float],
     use_rag: bool = True,
-):
+    rag_top_k: int = 3,
+) -> Tuple[str, str, List[ChatMessage], List[RetrievedSource]]:
     """
     Core brain of our backend:
     - figure out the session_id
-    - build messages = [system prompt + history + new user message]
+    - build messages = [system prompt + optional RAG context + history + new user message]
     - call OpenAI
     - update memory
-    - return (session_id, reply, history)
+    - return (session_id, reply, history, sources)
     """
 
-    # Ensure we have a session_id
+    # 1) Ensure we have a session_id
     sid = memory.ensure_session_id(session_id)
 
-    # Start with the system prompt
+    # 2) Start with the system prompt
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": _SYSTEM_PROMPT}
     ]
 
-    # add RAG context if enabled
+    sources: List[RetrievedSource] = []
+
+    # 3) (optional) RAG: pull context from Qdrant
     if use_rag:
-        rag_context = _build_rag_context(user_message)
-        if rag_context:
-            messages.append({"role": "system", "content": rag_context})
+        sources = rag_service.retrieve_for_query(user_message, limit=rag_top_k)
+        if sources:
+            context_blocks: List[str] = []
+            for idx, s in enumerate(sources, start=1):
+                context_blocks.append(f"[{idx}] {s.title}\n{s.text}")
 
-    # add previous messages from this session
+            context_text = "\n\n".join(context_blocks)
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Here is some context from internal documents. "
+                        "Use it when relevant, and mention it if you rely on it:\n\n"
+                        f"{context_text}"
+                    ),
+                }
+            )
+
+    # 4) Add conversation history
     history = memory.get_history(sid)
-    messages.extend(history)
+    messages.extend({"role": m.role, "content": m.content} for m in history)
 
-    # Add the latest user message
+    # 5) Add the latest user message
     messages.append({"role": "user", "content": user_message})
 
-    # call OpenAI
     client = get_client()
-    model_to_use = model or settings.openai_model
-    temp_to_use = temperature if temperature is not None else settings.openai_temperature
+    model = model or settings.openai_model
+    temperature = temperature if temperature is not None else settings.openai_temperature
 
     try:
         resp = client.chat.completions.create(
-            model=model_to_use,
+            model=model,
             messages=messages,
-            temperature=temp_to_use,
+            temperature=temperature,
         )
-        # openai==1.x returns a pydantic-ish object; access message content like dict
         reply = resp.choices[0].message["content"]
     except OpenAIError as e:
-        # Bubble up a clear message for API layer
         log.exception("OpenAI error")
         raise RuntimeError(f"OpenAIError: {getattr(e, 'message', str(e))}")
     except Exception as e:
         log.exception("Unexpected LLM error")
         raise RuntimeError(f"LLM error: {str(e)}")
 
-    # update memory: first user message, then assistant reply
+    # 6) Update memory: user message + assistant reply
     memory.append_message(sid, "user", user_message)
     memory.append_message(sid, "assistant", reply)
-
-    # return updated history (as list of {role, content})
     updated_history = memory.get_history(sid)
-    return sid, reply, updated_history
+
+    return sid, reply, updated_history, sources

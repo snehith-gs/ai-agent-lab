@@ -14,7 +14,7 @@ class Settings(BaseModel):
 
     # Qdrant / RAG settings
     qdrant_url: str = "http://localhost:6333"
-    qdrant_collection: str = "ai_agent_docs"
+    qdrant_collection: str = "ai-agent-lab-docs"
     openai_embedding_model: str = "text-embedding-3-small"
 
 settings = Settings()

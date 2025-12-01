@@ -1,137 +1,193 @@
-from __future__ import annotations
-
 import logging
-from typing import List, TypedDict
+import uuid
+from typing import List, Dict, Any, Optional
 
-from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
+from qdrant_client.http.models import PointStruct, VectorParams, Distance
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+from openai import OpenAI
 
 from app.core.settings import settings
+from app.models.schemas import RetrievedSource
 
 log = logging.getLogger(__name__)
 
-class RetrievedChunk(TypedDict):
-    content: str
-    source: str
-    score: float
+# --- Qdrant + OpenAI clients ---
+
+_qdrant: Optional[QdrantClient] = None
+_embeddings_client: Optional[OpenAI] = None
+
+COLLECTION_NAME = "ai_agent_docs"
+EMBED_DIM = 1536  # for text-embedding-3-small
+CHUNK_SIZE = 400   # chars
+CHUNK_OVERLAP = 80 # chars
 
 
-_qdrant_client: QdrantClient | None = None
-_embed_client: OpenAI | None = None
-
-
-def get_qdrant_client() -> QdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(
+def get_qdrant() -> QdrantClient:
+    global _qdrant
+    if _qdrant is None:
+        _qdrant = QdrantClient(
             url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key or None,
+            prefer_grpc=False,
+            # No api_key for local Qdrant
         )
-    return _qdrant_client
+    return _qdrant
 
 
-def get_embed_client() -> OpenAI:
-    global _embed_client
-    if _embed_client is None:
+def get_embeddings_client() -> OpenAI:
+    global _embeddings_client
+    if _embeddings_client is None:
         if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing, cannot do embeddings.")
-        _embed_client = OpenAI(api_key=settings.openai_api_key)
-    return _embed_client
+            raise RuntimeError("OPENAI_API_KEY missing for embeddings.")
+        _embeddings_client = OpenAI(api_key=settings.openai_api_key)
+    return _embeddings_client
+
+
+def ensure_collection() -> None:
+    """
+    Create the collection if it does not exist.
+    """
+    client = get_qdrant()
+    existing = [c.name for c in client.get_collections().collections]
+    if COLLECTION_NAME in existing:
+        return
+
+    log.info("Creating Qdrant collection %s", COLLECTION_NAME)
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=VectorParams(
+            size=EMBED_DIM,
+            distance=Distance.COSINE,
+        ),
+    )
 
 
 def embed_text(text: str) -> List[float]:
-    client = get_embed_client()
-    try:
-        resp = client.embeddings.create(
-            model=settings.openai_embedding_model,
-            input=texts,
-        )
-        return resp.data[0].embedding
-    except OpenAIError as e:
-        log.exception("OpenAI embedding error")
-        raise RuntimeError(f"Embedding error: {getattr(e, 'message', str(e))}")
-    except Exception as e:
-        log.exception("Unexpected embedding error")
-        raise RuntimeError(f"Embedding error: {str(e)}")
+    client = get_embeddings_client()
+    resp = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text,
+    )
+    return resp.data[0].embedding
 
 
-def simple_chunk(text: str, max_chars: int = 800) -> List[str]:
-    text = text.strip().replace("\r\n", "\n")
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+def _chunk_text(text: str) -> List[str]:
+    """
+    Simple character-based chunking with overlap.
+    """
     chunks: List[str] = []
-
-    for p in paragraphs:
-        if len(p) <= max_chars:
-            chunks.append(p)
-        else:
-            # split long paragraph
-            for i in range(0, len(p), max_chars):
-                chunks.append(p[i: i + max_chars])
-
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_SIZE
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start += CHUNK_SIZE - CHUNK_OVERLAP
     return chunks
 
 
-def index_document(doc_id: str, text: str, metadata: dict | None = None) -> int:
+def index_document(
+    doc_id: str,
+    content: str,
+    source: Optional[str] = None,
+    tags: Optional[Dict[str, Any]] = None,
+) -> None:
     """
-    - chunk text
-    - embed each chunk
-    - ensure collection
-    - upsert into Qdrant with payload = {doc_id, chunk, ...metadata}
-    - return number of chunks stored
+    Store a single long document into Qdrant as multiple chunks.
     """
-    chunks = simple_chunk(text)
-    if not chunks:
-        return 0
+    ensure_collection()
+    client = get_qdrant()
+    chunks = _chunk_text(content)
+    points: List[PointStruct] = []
 
-    vectors = embed_texts(chunks)
-    vector_size = len(vectors[0])
-
-    vector_store.ensure_collection(vector_size)
-
-    payloads = []
-    for i, chunk in enumerate(chunks):
-        payload = {
+    for idx, chunk in enumerate(chunks):
+        emb = embed_text(chunk)
+        point_id = str(uuid.uuid4())
+        payload: Dict[str, Any] = {
             "doc_id": doc_id,
-            "chunk_index": i,
+            "chunk_index": idx,
             "text": chunk,
         }
-        if metadata:
-            payload.update(metadata)
-        payloads.append(payload)
+        if source:
+            payload["source"] = source
+        if tags:
+            payload["tags"] = tags
 
-    vector_store.upsert_points(vectors, payloads)
-    return len(chunks)
-
-
-def retrieve_relevant_chunks(query: str, limit: int = 4) -> List[RetrievedChunk]:
-    """
-    Use Qdrant to find the most similar chunks for the given query.
-    Returns a list of dicts: {content, source, score}
-    """
-    vector = embed_text(query)
-    client = get_qdrant_client()
-
-    try:
-        search_result = client.search(
-            collection_name=settings.qdrant_collection,
-            query_vector=vector,
-            limit=limit,
-            with_payload=True,
-            score_threshold=0.3,  # tweakable
-        )
-    except Exception:
-        log.exception("Qdrant search failed")
-        return []
-
-    chunks: List[RetrievedChunk] = []
-    for p in search_result:
-        payload = p.payload or {}
-        chunks.append(
-            RetrievedChunk(
-                content=payload.get("content", ""),
-                source=str(payload.get("source", "unknown")),
-                score=float(p.score),
+        points.append(
+            PointStruct(
+                id=point_id,
+                vector=emb,
+                payload=payload,
             )
         )
-    return chunks
+
+    if not points:
+        log.warning("No chunks generated for doc_id=%s", doc_id)
+        return
+
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=points,
+    )
+    log.info("Indexed %d chunks for doc_id=%s", len(points), doc_id)
+
+
+def search_similar_chunks(
+    query: str,
+    top_k: int = 5,
+    doc_filter: Optional[str] = None,
+):
+    ensure_collection()
+    client = get_qdrant()
+    query_emb = embed_text(query)
+
+    qfilter = None
+    if doc_filter:
+        qfilter = Filter(
+            must=[
+                FieldCondition(
+                    key="doc_id",
+                    match=MatchValue(value=doc_filter),
+                )
+            ]
+        )
+
+    res = client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=query_emb,
+        limit=top_k,
+        query_filter=qfilter,
+        with_payload=True,
+        with_vectors=False,
+    )
+    return res  # list[ScoredPoint]
+
+
+def retrieve_for_query(
+    query: str,
+    limit: int = 3,
+    doc_filter: Optional[str] = None,
+) -> List[RetrievedSource]:
+    """
+    High-level helper for /chat:
+    - search Qdrant
+    - wrap results as RetrievedSource objects
+    """
+    results = search_similar_chunks(query, top_k=limit, doc_filter=doc_filter)
+
+    sources: List[RetrievedSource] = []
+    for r in results:
+        payload = r.payload or {}
+        text = payload.get("text", "")
+        doc_id = payload.get("doc_id", "")
+        source = payload.get("source") or doc_id
+
+        sources.append(
+            RetrievedSource(
+                doc_id=doc_id,
+                title=str(source),
+                text=text,
+                score=r.score,
+            )
+        )
+
+    return sources

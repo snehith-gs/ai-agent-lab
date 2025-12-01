@@ -1,48 +1,28 @@
 from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Optional
 
 class ChatMessage(BaseModel):
-    role: str = Literal["system", "user", "assistant"]
+    role: str = Field(pattern="^(user|assistant|system)$")
     content: str
 
+class RetrievedSource(BaseModel):
+    doc_id: str
+    title: str
+    text: str
+    score: float
+
 class ChatRequest(BaseModel):
-    # None = start of a new conversation; backend will generate one
-    session_id: Optional[str] = Field(default=None)
-    # Single message text from the user
-    message: str = Field(min_length=1)
-    # Optional model/temperature overrides
+    session_id: Optional[str] = None
+    message: str
     model: Optional[str] = None
-    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    temperature: Optional[float] = None
+
+    # RAG flags
     use_rag: bool = True
+    rag_top_k: int = 3
 
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
     history: List[ChatMessage]
-
-from typing import Any, Dict, List, Optional  # if not already imported
-
-class Document(BaseModel):
-    id: str
-    title: Optional[str] = None
-    content: str
-    metadata: Dict[str, Any] | None = None
-
-
-class UpsertDocumentsRequest(BaseModel):
-    documents: List[Document]
-
-
-class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 3
-
-
-class SearchResult(BaseModel):
-    id: str
-    title: Optional[str] = None
-    content: str
-
-
-class SearchResponse(BaseModel):
-    results: List[SearchResult]
+    sources: List[RetrievedSource] | None = None

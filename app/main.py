@@ -9,8 +9,14 @@ from app.core.settings import settings
 from app.routers import health, chat, tools, docs
 
 configure_logging()
-app = FastAPI(title=settings.app_name, version=settings.version)
+app = FastAPI(title=settings.app_name, 
+              version=settings.version,
+              description="Backend API for building intelligent AI agents.")
 
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 # CORS (open during dev; tighten for prod)
 app.add_middleware(
